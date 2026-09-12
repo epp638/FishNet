@@ -151,6 +151,21 @@ namespace LiteNetLib
         private byte _channelsCount = 1;
         private readonly object _eventLock = new();
 
+        // FJ#1488 (plan_FJ1488 rev5 §4-§5): Transport-Epoche + Pending-Admission-Budget dieser
+        // NetManager-Instanz. Epoche wird in Start() VOR dem Thread-Start gesetzt (Thread.Start()
+        // stellt die Sichtbarkeit fuer ReceiveThread/LogicThread sicher, kein Interlocked noetig).
+        // Pending-Zaehler wird ausschliesslich per Interlocked veraendert, weil OnConnectionSolved
+        // (ReceiveThread) und der Vor-Auth-Timeout-Check in NetPeer.Update (LogicThread) beide
+        // schreiben koennen.
+        private long _fjEpoch;
+        private int _fjPendingUnauthenticatedCount;
+        /// <summary>Obergrenze gleichzeitig unauthentifizierter Peers (rev5 §7.1 Startwert 16).</summary>
+        internal int FjMaxPendingUnauthenticated = 16;
+        /// <summary>Vor-Auth-Frist in Millisekunden (rev5 §8.1 Startwert 30s).</summary>
+        internal long FjPreAuthTimeoutMs = 30_000;
+        internal long FjEpoch => _fjEpoch;
+        internal int FjPendingUnauthenticatedCount => Volatile.Read(ref _fjPendingUnauthenticatedCount);
+
         // config section
         /// <summary>
         /// Enable messages receiving without connection. (with SendUnconnectedMessage method)
@@ -398,10 +413,14 @@ namespace LiteNetLib
 
             if (unsyncEvent || _manualMode)
             {
+                if (type == NetEvent.EType.ConnectionRequest)
+                    Fj1459SocketDiag.Emit("CONNREQ_ENQUEUE", $"remote={connectionRequest?.RemoteEndPoint} mode=unsynced-immediate");
                 ProcessEvent(evt);
             }
             else
             {
+                if (type == NetEvent.EType.ConnectionRequest)
+                    Fj1459SocketDiag.Emit("CONNREQ_ENQUEUE", $"remote={connectionRequest?.RemoteEndPoint} mode=queued");
                 lock (_eventLock)
                 {
                     if (_pendingEventTail == null)
@@ -449,6 +468,7 @@ namespace LiteNetLib
                     _netEventListener.OnNetworkLatencyUpdate(evt.Peer, evt.Latency);
                     break;
                 case NetEvent.EType.ConnectionRequest:
+                    Fj1459SocketDiag.Emit("CONNREQ_DEQUEUE", $"remote={evt.ConnectionRequest?.RemoteEndPoint}");
                     _netEventListener.OnConnectionRequest(evt.ConnectionRequest);
                     break;
                 case NetEvent.EType.MessageDelivered:

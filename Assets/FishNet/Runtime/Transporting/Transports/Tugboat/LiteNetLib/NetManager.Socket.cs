@@ -3,14 +3,123 @@
 #endif
 using System.Runtime.InteropServices;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using LiteNetLib.Utils;
 
 namespace LiteNetLib
 {
+    // FJ#1459 (Brief 1459b, temporaer -- Diagnose, siehe Ledger FJ#1459): instrumentiert die
+    // Socket-Grenze (Client-Send -> Npcap-Loopback-Capture -> Host-Receive), um zu unterscheiden
+    // ob ein UDP-Paket beim intermittierenden Verbindungsfehlschlag (a) nie gesendet, (b) gesendet
+    // aber nicht am Socket empfangen, oder (c) am Socket empfangen aber danach verworfen wird.
+    // Queue + eigener Writer-Thread PFLICHT (Brief-Vorgabe) -- kein synchrones File-IO auf dem
+    // Sende-/Empfangsthread, das waere selbst ein Beobachtereffekt fuer genau das Timing, das
+    // untersucht wird. NICHT dauerhaft gedacht -- nach Abschluss der Testserie wieder entfernen
+    // (PackageCache-Datei, ohnehin nicht versioniert).
+    // Public statt internal: CONNECT_RESULT wird zusaetzlich aus FJNetBootstrap.cs (Assets-
+    // Assembly, siehe FJ#1459) in dasselbe Log geschrieben.
+    public static class Fj1459SocketDiag
+    {
+        private static readonly BlockingCollection<string> _queue = new BlockingCollection<string>();
+        private static readonly object _initLock = new object();
+        private static volatile bool _started;
+        private static string _run = "";
+        private static string _role = "unknown";
+        private static string _filePath = "";
+
+        private static void EnsureStarted()
+        {
+            if (_started)
+                return;
+
+            lock (_initLock)
+            {
+                if (_started)
+                    return;
+
+                string[] args = Environment.GetCommandLineArgs();
+                bool hasServer = false;
+                bool hasClient = false;
+                foreach (string a in args)
+                {
+                    if (string.Equals(a, "-fjserver", StringComparison.OrdinalIgnoreCase)) hasServer = true;
+                    else if (string.Equals(a, "-fjclient", StringComparison.OrdinalIgnoreCase)) hasClient = true;
+                }
+                _role = (hasServer, hasClient) switch
+                {
+                    (true, true) => "host",
+                    (true, false) => "server",
+                    (false, true) => "client",
+                    _ => "unknown",
+                };
+
+                int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                _run = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss") + "_" + pid;
+
+                string dir = Path.Combine(AppContext.BaseDirectory, "FJ1459_NetDiag");
+                try { Directory.CreateDirectory(dir); }
+                catch { /* best effort -- Diagnose darf den Netzwerk-Betrieb nie stoeren */ }
+
+                _filePath = Path.Combine(dir, $"fj1459_{_role}_{pid}.log");
+
+                Thread writer = new Thread(WriterLoop) { IsBackground = true, Name = "Fj1459DiagWriter" };
+                writer.Start();
+                _started = true;
+
+                Emit("RUN_START", "");
+            }
+        }
+
+        private static void WriterLoop()
+        {
+            try
+            {
+                using StreamWriter sw = new StreamWriter(_filePath, append: true, Encoding.UTF8) { AutoFlush = false };
+                int sinceFlush = 0;
+                foreach (string line in _queue.GetConsumingEnumerable())
+                {
+                    sw.WriteLine(line);
+                    sinceFlush++;
+                    if (sinceFlush >= 8)
+                    {
+                        sw.Flush();
+                        sinceFlush = 0;
+                    }
+                }
+                sw.Flush();
+            }
+            catch
+            {
+                // Diagnose darf den Netzwerk-Betrieb nie stoeren.
+            }
+        }
+
+        public static void Emit(string evt, string extra)
+        {
+            EnsureStarted();
+            string line = $"{evt}\trun={_run}\tpid={System.Diagnostics.Process.GetCurrentProcess().Id}\trole={_role}" +
+                $"\tutc={DateTime.UtcNow:O}\tticks={Environment.TickCount}" +
+                (string.IsNullOrEmpty(extra) ? "" : $"\t{extra}");
+            _queue.Add(line);
+        }
+
+        // Volle Nutzlast, nicht nur ein Praefix (Brief-Vorgabe) -- Handshake-Pakete in dieser
+        // Phase sind klein (Connect/Accept/Ping), kein Grosstext-Risiko.
+        public static string Hex(byte[] data, int offset, int length)
+        {
+            var sb = new StringBuilder(length * 2);
+            for (int i = 0; i < length; i++)
+                sb.Append(data[offset + i].ToString("x2"));
+            return sb.ToString();
+        }
+    }
+
     public partial class NetManager
     {
         private const int ReceivePollingTime = 500000; // 0.5 second
@@ -235,14 +344,29 @@ namespace LiteNetLib
         private void ReceiveFrom(Socket s, ref EndPoint bufferEndPoint)
         {
             NetPacket packet = PoolGetPacket(NetConstants.MaxPacketSize);
-            #if NET8_0_OR_GREATER
-            var sockAddr = s.AddressFamily == AddressFamily.InterNetwork ? _sockAddrCacheV4 : _sockAddrCacheV6;
-            packet.Size = s.ReceiveFrom(packet, SocketFlags.None, sockAddr);
-            OnMessageReceived(packet, TryGetPeer(sockAddr, out var peer) ? peer : (IPEndPoint)bufferEndPoint.Create(sockAddr));
-            #else
-            packet.Size = s.ReceiveFrom(packet.RawData, 0, NetConstants.MaxPacketSize, SocketFlags.None, ref bufferEndPoint);
-            OnMessageReceived(packet, (IPEndPoint)bufferEndPoint);
-            #endif
+            Fj1459SocketDiag.Emit("RX_BEGIN", $"socketId={s.Handle}");
+            try
+            {
+                #if NET8_0_OR_GREATER
+                var sockAddr = s.AddressFamily == AddressFamily.InterNetwork ? _sockAddrCacheV4 : _sockAddrCacheV6;
+                packet.Size = s.ReceiveFrom(packet, SocketFlags.None, sockAddr);
+                IPEndPoint from = TryGetPeer(sockAddr, out var peer) ? peer : (IPEndPoint)bufferEndPoint.Create(sockAddr);
+                // FJ#1459: Bytes+Absender SOFORT als String kopiert, bevor der Puffer wiederverwendet wird.
+                Fj1459SocketDiag.Emit("RX_OK", $"socketId={s.Handle} from={from} len={packet.Size} payload={Fj1459SocketDiag.Hex(packet.RawData, 0, packet.Size)}");
+                OnMessageReceived(packet, from);
+                #else
+                packet.Size = s.ReceiveFrom(packet.RawData, 0, NetConstants.MaxPacketSize, SocketFlags.None, ref bufferEndPoint);
+                IPEndPoint from = (IPEndPoint)bufferEndPoint;
+                // FJ#1459: Bytes+Absender SOFORT als String kopiert, bevor der Puffer wiederverwendet wird.
+                Fj1459SocketDiag.Emit("RX_OK", $"socketId={s.Handle} from={from} len={packet.Size} payload={Fj1459SocketDiag.Hex(packet.RawData, 0, packet.Size)}");
+                OnMessageReceived(packet, from);
+                #endif
+            }
+            catch (Exception ex)
+            {
+                Fj1459SocketDiag.Emit("RX_ERROR", $"socketId={s.Handle} error={ex.GetType().Name}:{ex.Message}");
+                throw;
+            }
         }
 
         private void ReceiveLogic()
@@ -332,6 +456,13 @@ namespace LiteNetLib
                 return false;
 
             LocalPort = ((IPEndPoint)_udpSocketv4.LocalEndPoint).Port;
+
+            // FJ#1488 (rev5 §4.1/§5.3): neue Transport-Epoche VOR dem Thread-Start setzen --
+            // Thread.Start() weiter unten stellt die Sichtbarkeit fuer ReceiveThread/LogicThread
+            // sicher, ein spaeteres Ereignis/eine spaete Freigabe aus einer VORHERIGEN Epoche
+            // (z.B. nach Stop()+Restart()) traegt dadurch nachweisbar die alte Epochennummer.
+            _fjEpoch++;
+            _fjPendingUnauthenticatedCount = 0;
 
             #if UNITY_SOCKET_FIX
             if (_useSocketFix && _pausedSocketFix == null)
@@ -442,6 +573,7 @@ namespace LiteNetLib
             {
                 socket.Bind(ep);
                 NetDebug.Write(NetLogLevel.Trace, $"[B]Successfully binded to port: {((IPEndPoint)socket.LocalEndPoint).Port}, AF: {socket.AddressFamily}");
+                Fj1459SocketDiag.Emit("BIND_OK", $"socketId={socket.Handle} local={socket.LocalEndPoint} af={socket.AddressFamily}");
 
                 // join multicast
                 if (ep.AddressFamily == AddressFamily.InterNetworkV6)
@@ -527,6 +659,7 @@ namespace LiteNetLib
             }
 
             int result;
+            Fj1459SocketDiag.Emit("TX_BEGIN", $"socketId={socket.Handle} to={remoteEndPoint} len={length} payload={Fj1459SocketDiag.Hex(message, start, length)}");
             try
             {
                 if (UseNativeSockets && remoteEndPoint is NetPeer peer)
@@ -550,9 +683,11 @@ namespace LiteNetLib
                     #endif
                 }
                 // NetDebug.WriteForce("[S]Send packet to {0}, result: {1}", remoteEndPoint, result);
+                Fj1459SocketDiag.Emit("TX_OK", $"socketId={socket.Handle} to={remoteEndPoint} result={result}");
             }
             catch (SocketException ex)
             {
+                Fj1459SocketDiag.Emit("TX_ERROR", $"socketId={socket.Handle} to={remoteEndPoint} error={ex.SocketErrorCode}");
                 switch (ex.SocketErrorCode)
                 {
                     case SocketError.NoBufferSpaceAvailable:
@@ -583,6 +718,7 @@ namespace LiteNetLib
             }
             catch (Exception ex)
             {
+                Fj1459SocketDiag.Emit("TX_ERROR", $"socketId={socket.Handle} to={remoteEndPoint} error={ex.GetType().Name}:{ex.Message}");
                 NetDebug.WriteError($"[S] {ex}");
                 return 0;
             }
@@ -671,6 +807,7 @@ namespace LiteNetLib
 
         private void CloseSocket()
         {
+            Fj1459SocketDiag.Emit("SOCKET_CLOSE", $"v4={_udpSocketv4?.Handle} v6={_udpSocketv6?.Handle}");
             IsRunning = false;
             _udpSocketv4?.Close();
             _udpSocketv6?.Close();

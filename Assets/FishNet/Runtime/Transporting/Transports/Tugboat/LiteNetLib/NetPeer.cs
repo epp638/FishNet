@@ -111,6 +111,12 @@ namespace LiteNetLib
         /// </summary>
         public readonly NetManager NetManager;
         /// <summary>
+        /// FJ#1488 (plan_FJ1488 rev5 §4-§5): Admission-Lease, NUR fuer serverseitig echte Accepts
+        /// gesetzt (s. <see cref="FjAdmissionLease"/>-Klassenkommentar). Bleibt <c>null</c> fuer
+        /// ausgehende Client-Peers und fuer die kurzlebigen Reject-Benachrichtigungs-Peers.
+        /// </summary>
+        internal FjAdmissionLease? FjLease;
+        /// <summary>
         /// Current connection state
         /// </summary>
         public ConnectionState ConnectionState { get; private set; }
