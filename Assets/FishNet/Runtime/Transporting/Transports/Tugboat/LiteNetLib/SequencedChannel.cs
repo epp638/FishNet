@@ -43,7 +43,7 @@ namespace LiteNetLib
                 {
                     while (OutgoingQueue.Count > 0)
                     {
-                        NetPacket packet = OutgoingQueue.Dequeue();
+                        NetPacket packet = DequeueOutgoing(); // FJ#1488: gibt Sende-Budget frei
                         _localSequence = (_localSequence + 1) % NetConstants.MaxSequence;
                         packet.Sequence = (ushort)_localSequence;
                         packet.ChannelId = _id;

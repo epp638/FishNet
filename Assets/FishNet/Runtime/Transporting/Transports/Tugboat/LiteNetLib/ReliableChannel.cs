@@ -186,7 +186,7 @@ namespace LiteNetLib
                         if (relate >= _windowSize)
                             break;
 
-                        NetPacket netPacket = OutgoingQueue.Dequeue();
+                        NetPacket netPacket = DequeueOutgoing(); // FJ#1488: gibt Sende-Budget frei
                         netPacket.Sequence = (ushort)_localSeqence;
                         netPacket.ChannelId = _id;
                         _pendingPackets[_localSeqence % _windowSize].Init(netPacket);

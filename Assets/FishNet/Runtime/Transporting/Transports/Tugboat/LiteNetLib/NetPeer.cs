@@ -81,6 +81,24 @@ namespace LiteNetLib
         private readonly ConcurrentQueue<BaseChannel> _channelSendQueue;
         private readonly BaseChannel[] _channels;
 
+        /// <summary>FJ#1488 (rev5 §7.1/§7.2): einziger Einreihpunkt fuer <see cref="_unreliableChannel"/>
+        /// -- reserviert Sende-Budget wie <see cref="BaseChannel.AddToQueue"/>, denselben Pool
+        /// (<see cref="LiteNetLib.NetManager.FjTryReserveSend"/>), da beide Warteschlangen
+        /// dasselbe Risiko sind (ausgehende Daten, die ein stockender Peer nicht abnimmt).</summary>
+        private void FjEnqueueUnreliable(NetPacket packet)
+        {
+            if (!NetManager.FjTryReserveSend(this, packet.Size))
+            {
+                NetManager.PoolRecycle(packet);
+                NetManager.DisconnectPeerForce(this, DisconnectReason.FjQueueOverflow, 0, null);
+                return;
+            }
+            lock (_unreliableChannel)
+            {
+                _unreliableChannel.Enqueue(packet);
+            }
+        }
+
         // MTU
         private int _mtuIdx;
         private bool _finishMtu;
@@ -122,6 +140,11 @@ namespace LiteNetLib
         /// veraendern, nie direkt.</summary>
         internal long FjPendingReceiveBytes;
         internal int FjPendingReceiveEvents;
+        /// <summary>FJ#1488 (rev5 §7.1/§7.2): Bytes/Ereignisse dieses Peers, die aktuell in
+        /// <c>BaseChannel.OutgoingQueue</c> auf Versand warten -- NUR ueber
+        /// <see cref="NetManager.FjTryReserveSend"/>/<see cref="NetManager.FjReleaseSend"/> veraendern.</summary>
+        internal long FjPendingSendBytes;
+        internal int FjPendingSendEvents;
         /// <summary>
         /// Current connection state
         /// </summary>
@@ -328,10 +351,7 @@ namespace LiteNetLib
             }
             else
             {
-                lock (_unreliableChannel)
-                {
-                    _unreliableChannel.Enqueue(packet._packet);
-                }
+                FjEnqueueUnreliable(packet._packet);
             }
         }
 
@@ -659,10 +679,7 @@ namespace LiteNetLib
 
             if (channel == null) // unreliable
             {
-                lock (_unreliableChannel)
-                {
-                    _unreliableChannel.Enqueue(packet);
-                }
+                FjEnqueueUnreliable(packet);
             }
             else
             {
@@ -767,10 +784,7 @@ namespace LiteNetLib
 
             if (channel == null) // unreliable
             {
-                lock (_unreliableChannel)
-                {
-                    _unreliableChannel.Enqueue(packet);
-                }
+                FjEnqueueUnreliable(packet);
             }
             else
             {
@@ -1259,6 +1273,7 @@ namespace LiteNetLib
                 for (int i = 0; i < unreliableCount; i++)
                 {
                     NetPacket packet = _unreliableChannel.Dequeue();
+                    NetManager.FjReleaseSend(this, packet.Size); // FJ#1488: gibt Sende-Budget frei
                     SendUserData(packet);
                     NetManager.PoolRecycle(packet);
                 }

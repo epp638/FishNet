@@ -230,6 +230,43 @@ namespace LiteNetLib
             Interlocked.Decrement(ref _fjPendingReceiveEventsGlobal);
         }
 
+        // FJ#1488 (plan_FJ1488 rev5 §7.1/§7.2, Schritt 5 Fortsetzung): Budget auf
+        // BaseChannel.OutgoingQueue -- die einzige unbegrenzt wachsende ausgehende Struktur
+        // (das Reassemblierungs-Fenster dahinter, _pendingPackets, ist bereits fest auf
+        // _windowSize begrenzt). Waechst, wenn ein entfernter Peer nicht/langsam bestaetigt.
+        private long _fjPendingSendBytesGlobal;
+        private int _fjPendingSendEventsGlobal;
+        internal long FjMaxPendingSendBytesGlobal = 8L * 1024 * 1024;
+        internal int FjMaxPendingSendEventsGlobal = 8192;
+        internal long FjMaxPendingSendBytesPerPeer = 1L * 1024 * 1024;
+        internal int FjMaxPendingSendEventsPerPeer = 1024;
+
+        /// <summary>Analog zu <see cref="FjTryReserveReceive"/>, fuer die ausgehende Seite. Keine
+        /// engere Vor-Auth-Grenze -- ein Peer ohne Lease (Client-seitig oder abgelehnt) sendet
+        /// hier ohnehin nichts Nennenswertes, und ein noch nicht authentifizierter Server-Peer
+        /// bekommt von FishNet vor Auth keine Gameplay-Daten zugeteilt.</summary>
+        internal bool FjTryReserveSend(NetPeer peer, int size)
+        {
+            long peerBytes = Interlocked.Add(ref peer.FjPendingSendBytes, size);
+            int peerEvents = Interlocked.Increment(ref peer.FjPendingSendEvents);
+            long globalBytes = Interlocked.Add(ref _fjPendingSendBytesGlobal, size);
+            int globalEvents = Interlocked.Increment(ref _fjPendingSendEventsGlobal);
+
+            bool ok = peerBytes <= FjMaxPendingSendBytesPerPeer && peerEvents <= FjMaxPendingSendEventsPerPeer &&
+                globalBytes <= FjMaxPendingSendBytesGlobal && globalEvents <= FjMaxPendingSendEventsGlobal;
+            if (!ok)
+                FjReleaseSend(peer, size);
+            return ok;
+        }
+
+        internal void FjReleaseSend(NetPeer peer, int size)
+        {
+            Interlocked.Add(ref peer.FjPendingSendBytes, -size);
+            Interlocked.Decrement(ref peer.FjPendingSendEvents);
+            Interlocked.Add(ref _fjPendingSendBytesGlobal, -size);
+            Interlocked.Decrement(ref _fjPendingSendEventsGlobal);
+        }
+
         // config section
         /// <summary>
         /// Enable messages receiving without connection. (with SendUnconnectedMessage method)
