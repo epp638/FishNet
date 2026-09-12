@@ -683,8 +683,13 @@ namespace LiteNetLib
                         // danach den Peer veroeffentlichen und die Annahmeantwort senden (vorher
                         // sendete der Accept-Konstruktor selbst, noch VOR jeder Admission-
                         // Buchhaltung -- Bibliotheks-Nachweis, Ledger FJ#1488 "Diagnose 2").
-                        long fjAcceptedAtTicks = Environment.TickCount64;
-                        netPeer.FjLease = new FjAdmissionLease(_fjEpoch, fjAcceptedAtTicks, fjAcceptedAtTicks + FjPreAuthTimeoutMs);
+                        // Stopwatch.GetTimestamp() statt Environment.TickCount64 -- Letzteres
+                        // existiert unter Unitys .NET-Standard-Kompatibilitaetsstufe nicht
+                        // (CS0117, verifiziert). Stopwatch.Frequency rechnet die konfigurierte
+                        // Millisekunden-Frist in dieselbe Zeiteinheit um.
+                        long fjAcceptedAtTicks = Stopwatch.GetTimestamp();
+                        long fjPreAuthTimeoutStopwatchTicks = (long)(FjPreAuthTimeoutMs / 1000.0 * Stopwatch.Frequency);
+                        netPeer.FjLease = new FjAdmissionLease(_fjEpoch, fjAcceptedAtTicks, fjAcceptedAtTicks + fjPreAuthTimeoutStopwatchTicks);
                         Interlocked.Increment(ref _fjPendingUnauthenticatedCount);
 
                         AddPeer(netPeer);

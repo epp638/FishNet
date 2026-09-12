@@ -29,12 +29,14 @@ namespace LiteNetLib
         /// bereits gestoppten Epoche zu erkennen, statt es auf eine neue Epoche wirken zu lassen.</summary>
         internal readonly long Epoch;
 
-        /// <summary>Monotoner Zeitpunkt der Annahme (<see cref="System.Environment.TickCount64"/>),
-        /// gesetzt auf dem Netz-Thread.</summary>
+        /// <summary>Monotoner Zeitpunkt der Annahme (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>),
+        /// gesetzt auf dem Netz-Thread. NICHT <c>Environment.TickCount64</c> -- existiert unter
+        /// Unitys .NET-Standard-Kompatibilitaetsstufe nicht (CS0117, verifiziert).</summary>
         internal readonly long AcceptedAtTicks;
 
-        /// <summary>Monotoner Zeitpunkt, ab dem die Vor-Auth-Frist als abgelaufen gilt
-        /// (<c>AcceptedAtTicks + NetManager.FjPreAuthTimeoutMs</c>).</summary>
+        /// <summary>Monotoner Zeitpunkt (dieselbe Stopwatch-Zeiteinheit wie <see cref="AcceptedAtTicks"/>),
+        /// ab dem die Vor-Auth-Frist als abgelaufen gilt (<c>AcceptedAtTicks + FjPreAuthTimeoutMs</c>
+        /// umgerechnet ueber <see cref="System.Diagnostics.Stopwatch.Frequency"/>).</summary>
         internal readonly long PreAuthDeadlineTicks;
 
         private int _state;
