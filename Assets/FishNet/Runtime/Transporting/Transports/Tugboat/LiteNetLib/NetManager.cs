@@ -677,7 +677,18 @@ namespace LiteNetLib
                     else // Accept
                     {
                         netPeer = new(this, request, GetNextPeerId());
+
+                        // FJ#1488 (plan_FJ1488 rev5 §5.2): Lease VOR AddPeer vollstaendig
+                        // vorbereiten -- Epoche, monotone Annahmezeit, Vor-Auth-Deadline. Erst
+                        // danach den Peer veroeffentlichen und die Annahmeantwort senden (vorher
+                        // sendete der Accept-Konstruktor selbst, noch VOR jeder Admission-
+                        // Buchhaltung -- Bibliotheks-Nachweis, Ledger FJ#1488 "Diagnose 2").
+                        long fjAcceptedAtTicks = Environment.TickCount64;
+                        netPeer.FjLease = new FjAdmissionLease(_fjEpoch, fjAcceptedAtTicks, fjAcceptedAtTicks + FjPreAuthTimeoutMs);
+                        Interlocked.Increment(ref _fjPendingUnauthenticatedCount);
+
                         AddPeer(netPeer);
+                        netPeer.FjSendConnectAccept();
                         CreateEvent(NetEvent.EType.Connect, netPeer);
                         NetDebug.Write(NetLogLevel.Trace, $"[NM] Received peer connection Id: {netPeer.ConnectTime}, EP: {netPeer}");
                     }

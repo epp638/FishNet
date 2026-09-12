@@ -151,6 +151,17 @@ namespace LiteNetLib
         {
             if (!RemovePeerFromSet(peer))
                 return;
+
+            // FJ#1488 (plan_FJ1488 rev5 §5.1/§5.3): dritter atomarer Uebergang aus Pending.
+            // RemovePeerFromSet liefert oben bereits false bei einem bereits entfernten Peer --
+            // dieser Codepfad laeuft also hoechstens einmal pro Peer, trotzdem bleibt der
+            // CompareExchange die alleinige Quelle der Wahrheit (kein Read-dann-Write).
+            if (peer.FjLease != null &&
+                peer.FjLease.TryTransition(FjAdmissionLease.StatePending, FjAdmissionLease.StateClosed))
+            {
+                Interlocked.Decrement(ref _fjPendingUnauthenticatedCount);
+            }
+
             if (peer == _headPeer)
                 _headPeer = peer.NextPeer;
 

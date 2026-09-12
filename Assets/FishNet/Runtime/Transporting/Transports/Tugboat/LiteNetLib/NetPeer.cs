@@ -386,10 +386,21 @@ namespace LiteNetLib
             // Make Connected
             ConnectionState = ConnectionState.Connected;
 
-            // Send
-            NetManager.SendRaw(_connectAcceptPacket, this);
+            // FJ#1488 (plan_FJ1488 rev5 §5.2): das Senden wandert aus dem Konstruktor in
+            // NetManager.OnConnectionSolved (FjSendConnectAccept-Aufruf, NACH Lease-Erzeugung) --
+            // vorher sendete dieser Ctor bereits, BEVOR die Admission-Buchhaltung fuer den Peer
+            // ueberhaupt existierte (Bibliotheks-Nachweis, Ledger FJ#1488 "Diagnose 2").
 
             NetDebug.Write(NetLogLevel.Trace, $"[CC] ConnectId: {ConnectTime}");
+        }
+
+        /// <summary>FJ#1488 (rev5 §5.2): sendet das beim Accept vorbereitete ConnectAccept-Paket.
+        /// Wird von <see cref="NetManager.OnConnectionSolved"/> explizit aufgerufen, NACHDEM die
+        /// Admission-Lease fuer diesen Peer vollstaendig vorbereitet ist -- nicht mehr implizit
+        /// aus dem Konstruktor heraus.</summary>
+        internal void FjSendConnectAccept()
+        {
+            NetManager.SendRaw(_connectAcceptPacket, this);
         }
 
         // Reject
