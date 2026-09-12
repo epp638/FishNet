@@ -116,6 +116,12 @@ namespace LiteNetLib
         /// ausgehende Client-Peers und fuer die kurzlebigen Reject-Benachrichtigungs-Peers.
         /// </summary>
         internal FjAdmissionLease? FjLease;
+        /// <summary>FJ#1488 (rev5 §7.1/§7.2): Bytes/Ereignisse dieses Peers, die aktuell in der
+        /// Hauptthread-Warteschlange (<c>NetManager._pendingEventHead</c>) auf Abholung warten --
+        /// NUR ueber <see cref="NetManager.FjTryReserveReceive"/>/<see cref="NetManager.FjReleaseReceive"/>
+        /// veraendern, nie direkt.</summary>
+        internal long FjPendingReceiveBytes;
+        internal int FjPendingReceiveEvents;
         /// <summary>
         /// Current connection state
         /// </summary>

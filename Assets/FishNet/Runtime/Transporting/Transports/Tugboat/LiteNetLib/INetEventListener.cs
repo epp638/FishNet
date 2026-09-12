@@ -29,7 +29,12 @@ namespace LiteNetLib
         UnknownHost,
         Reconnect,
         PeerToPeerConnection,
-        PeerNotFound
+        PeerNotFound,
+        /// <summary>FJ#1488 (plan_FJ1488 rev5 §7.3): Peer wurde getrennt, weil eine
+        /// Empfangs-Budgetgrenze (pro Peer oder global) ueberschritten wurde -- diagnostisch
+        /// getrennt von <see cref="Timeout"/> (Inaktivitaet), damit Ueberlast nicht mit einer
+        /// echten Netzwerkstoerung verwechselt wird.</summary>
+        FjQueueOverflow
     }
 
     /// <summary>

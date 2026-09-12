@@ -80,6 +80,12 @@ namespace LiteNetLib
         public DeliveryMethod DeliveryMethod;
         public byte ChannelNumber;
         public readonly NetPacketReader DataReader;
+        /// <summary>FJ#1488 (rev5 §7.2): Bytes, die fuer DIESES Ereignis bei
+        /// <see cref="NetManager.FjTryReserveReceive"/> reserviert wurden -- 0 fuer alles außer
+        /// erfolgreich eingereihte <see cref="EType.Receive"/>-Ereignisse. Beim Dequeue in
+        /// <c>ProcessEvent</c> wird GENAU dieser Wert wieder freigegeben, nicht neu berechnet --
+        /// sonst driften Reservierung und Freigabe bei Kopf-/Padding-Unterschieden auseinander.</summary>
+        public int FjReservedBytes;
 
         public NetEvent(NetManager manager)
         {
@@ -165,6 +171,64 @@ namespace LiteNetLib
         internal long FjPreAuthTimeoutMs = 30_000;
         internal long FjEpoch => _fjEpoch;
         internal int FjPendingUnauthenticatedCount => Volatile.Read(ref _fjPendingUnauthenticatedCount);
+
+        // FJ#1488 (plan_FJ1488 rev5 §7.1/§7.2, Schritt 5): Budget auf der ERSTEN
+        // Hauptthread-Warteschlange (_pendingEventHead/_pendingEventTail, s. Ledger FJ#1488
+        // "Diagnose 2") -- vor dem Einreihen reserviert, nicht erst in Tugboats _incoming.
+        // Gezaehlt werden NUR EType.Receive-Ereignisse (Nutzdaten, angreifbar durch einen
+        // fehlerhaften/boesartigen Peer) -- Connect/Disconnect/ConnectionRequest haengen bereits
+        // ueber das Admission-/Pending-Budget (oben) an der Verbindungs-Lebensdauer, nicht an
+        // frei waehlbarer Paketmenge.
+        private long _fjPendingReceiveBytesGlobal;
+        private int _fjPendingReceiveEventsGlobal;
+        internal long FjMaxPendingReceiveBytesGlobal = 8L * 1024 * 1024;
+        internal int FjMaxPendingReceiveEventsGlobal = 8192;
+        internal long FjMaxPendingReceiveBytesPerPeer = 1L * 1024 * 1024;
+        internal int FjMaxPendingReceiveEventsPerPeer = 1024;
+        /// <summary>Engere Grenze fuer Peers, deren Lease noch <c>Pending</c> ist (rev5 §7.1) --
+        /// ein unauthentifizierter Peer darf nicht dasselbe Datenvolumen aufstauen wie ein
+        /// authentifizierter.</summary>
+        internal long FjMaxPendingReceiveBytesPreAuth = 64 * 1024;
+        internal int FjMaxPendingReceiveEventsPreAuth = 128;
+        internal long FjPendingReceiveBytesGlobal => Volatile.Read(ref _fjPendingReceiveBytesGlobal);
+        internal int FjPendingReceiveEventsGlobal => Volatile.Read(ref _fjPendingReceiveEventsGlobal);
+
+        /// <summary>Versucht, Budget fuer EIN eingehendes Receive-Ereignis von <paramref name="peer"/>
+        /// mit <paramref name="size"/> Bytes zu reservieren -- global UND pro Peer, mit der
+        /// engeren Vor-Auth-Grenze fuer noch nicht authentifizierte Peers. Bei Ueberschreitung wird
+        /// die Reservierung SOFORT wieder zurueckgegeben (kein Verbleib in einem inkonsistenten
+        /// Zwischenzustand) und <c>false</c> geliefert -- der Aufrufer verwirft das Paket und
+        /// verwirft KEIN Ereignis, das er nicht auch reserviert hat.</summary>
+        internal bool FjTryReserveReceive(NetPeer peer, int size)
+        {
+            bool preAuth = peer.FjLease != null && peer.FjLease.CurrentState == FjAdmissionLease.StatePending;
+            long maxBytesPerPeer = preAuth ? FjMaxPendingReceiveBytesPreAuth : FjMaxPendingReceiveBytesPerPeer;
+            int maxEventsPerPeer = preAuth ? FjMaxPendingReceiveEventsPreAuth : FjMaxPendingReceiveEventsPerPeer;
+
+            long peerBytes = Interlocked.Add(ref peer.FjPendingReceiveBytes, size);
+            int peerEvents = Interlocked.Increment(ref peer.FjPendingReceiveEvents);
+            long globalBytes = Interlocked.Add(ref _fjPendingReceiveBytesGlobal, size);
+            int globalEvents = Interlocked.Increment(ref _fjPendingReceiveEventsGlobal);
+
+            bool ok = peerBytes <= maxBytesPerPeer && peerEvents <= maxEventsPerPeer &&
+                globalBytes <= FjMaxPendingReceiveBytesGlobal && globalEvents <= FjMaxPendingReceiveEventsGlobal;
+            if (!ok)
+                FjReleaseReceive(peer, size);
+            return ok;
+        }
+
+        /// <summary>Gibt eine per <see cref="FjTryReserveReceive"/> reservierte Menge wieder frei --
+        /// entweder weil die Reservierung selbst gescheitert ist (sofortiger Rollback) oder weil das
+        /// zugehoerige Ereignis in <c>ProcessEvent</c> tatsaechlich abgearbeitet wurde. Peer darf
+        /// bereits <c>null</c>-Referenzen auf Felder haben, wenn er inzwischen entfernt wurde --
+        /// die Felder leben auf dem Objekt selbst und bleiben gueltig, solange die Referenz lebt.</summary>
+        internal void FjReleaseReceive(NetPeer peer, int size)
+        {
+            Interlocked.Add(ref peer.FjPendingReceiveBytes, -size);
+            Interlocked.Decrement(ref peer.FjPendingReceiveEvents);
+            Interlocked.Add(ref _fjPendingReceiveBytesGlobal, -size);
+            Interlocked.Decrement(ref _fjPendingReceiveEventsGlobal);
+        }
 
         // config section
         /// <summary>
@@ -452,6 +516,16 @@ namespace LiteNetLib
                     RemovePeer(evt.Peer);
                     break;
                 case NetEvent.EType.Receive:
+                    // FJ#1488 (rev5 §7.2): Reservierung freigeben, BEVOR der Listener aufgerufen
+                    // wird -- der Speicher/Slot ist ab jetzt wieder verfuegbar, unabhaengig davon,
+                    // wie lange der Listener braucht. Guard auf >0, weil der unsynced-Sofortpfad
+                    // (oben in CreateReceiveEvent) nie reserviert und FjReservedBytes dort explizit
+                    // auf 0 setzt -- kein Doppel-Release fuer ein wiederverwendetes Pool-Objekt.
+                    if (evt.FjReservedBytes > 0 && evt.Peer != null)
+                    {
+                        FjReleaseReceive(evt.Peer, evt.FjReservedBytes);
+                        evt.FjReservedBytes = 0;
+                    }
                     _netEventListener.OnNetworkReceive(evt.Peer, evt.DataReader, evt.ChannelNumber, evt.DeliveryMethod);
                     break;
                 case NetEvent.EType.ReceiveUnconnected:
@@ -1033,10 +1107,31 @@ namespace LiteNetLib
                 evt.Peer = fromPeer;
                 evt.DeliveryMethod = method;
                 evt.ChannelNumber = channelNumber;
+                // FJ#1488: dieser Pfad verarbeitet SOFORT, ohne je in _pendingEventHead zu warten
+                // -- keine Reservierung noetig. FjReservedBytes explizit auf 0, falls dieses
+                // gepoolte Event-Objekt zuvor ueber den anderen Pfad reserviert+wieder freigegeben
+                // wurde (sonst wuerde ProcessEvent unten faelschlich ein zweites Mal freigeben).
+                evt.FjReservedBytes = 0;
                 ProcessEvent(evt);
             }
             else
             {
+                // FJ#1488 (rev5 §7.2): Budget VOR dem Einreihen reservieren -- dies ist die erste
+                // Hauptthread-Warteschlange (_pendingEventHead), nicht erst Tugboats _incoming.
+                // Scheitert die Reservierung, wird das Paket verworfen und NICHT eingereiht --
+                // kein Event-Objekt aus dem Pool wird dafuer verbraucht.
+                if (!FjTryReserveReceive(fromPeer, packet.Size))
+                {
+                    // FJ#1488 (rev5 §7.3): "der Peer, dessen zusaetzliche Anforderung nicht
+                    // reserviert werden kann, wird kontrolliert geschlossen" -- gilt unabhaengig
+                    // davon, ob die PER-PEER- oder die GLOBALE Grenze den Ausschlag gab. Kein
+                    // stilles Dauer-Verwerfen: ein Peer, der sein Budget sprengt, wird beendet,
+                    // nicht auf unbestimmte Zeit gedrosselt.
+                    PoolRecycle(packet);
+                    DisconnectPeerForce(fromPeer, DisconnectReason.FjQueueOverflow, 0, null);
+                    return;
+                }
+
                 lock (_eventLock)
                 {
                     evt = _netEventPoolHead;
@@ -1051,6 +1146,7 @@ namespace LiteNetLib
                     evt.Peer = fromPeer;
                     evt.DeliveryMethod = method;
                     evt.ChannelNumber = channelNumber;
+                    evt.FjReservedBytes = packet.Size;
 
                     if (_pendingEventTail == null)
                         _pendingEventHead = evt;
