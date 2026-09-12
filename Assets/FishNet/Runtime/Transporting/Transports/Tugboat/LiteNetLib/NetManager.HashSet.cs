@@ -161,6 +161,11 @@ namespace LiteNetLib
             {
                 Interlocked.Decrement(ref _fjPendingUnauthenticatedCount);
             }
+            if (peer.FjLease != null)
+            {
+                FjDiagRing.Log(peer.FjLease.Epoch, "Closed",
+                    $"PeerId={peer.Id} LeaseState={peer.FjLease.CurrentState} RecvBytes={peer.FjPendingReceiveBytes} SendBytes={peer.FjPendingSendBytes}");
+            }
 
             if (peer == _headPeer)
                 _headPeer = peer.NextPeer;

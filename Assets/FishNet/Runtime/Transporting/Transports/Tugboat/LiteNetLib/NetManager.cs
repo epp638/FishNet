@@ -807,6 +807,7 @@ namespace LiteNetLib
                         netPeer.FjSendConnectAccept();
                         CreateEvent(NetEvent.EType.Connect, netPeer);
                         NetDebug.Write(NetLogLevel.Trace, $"[NM] Received peer connection Id: {netPeer.ConnectTime}, EP: {netPeer}");
+                        FjDiagRing.Log(_fjEpoch, "Accept", $"PeerId={netPeer.Id} Remote={request.RemoteEndPoint} Pending={_fjPendingUnauthenticatedCount}");
                     }
                     _requestsDict.Remove(request.RemoteEndPoint);
                 }
@@ -1165,6 +1166,8 @@ namespace LiteNetLib
                     // stilles Dauer-Verwerfen: ein Peer, der sein Budget sprengt, wird beendet,
                     // nicht auf unbestimmte Zeit gedrosselt.
                     PoolRecycle(packet);
+                    FjDiagRing.Log(_fjEpoch, "RecvOverflow",
+                        $"PeerId={fromPeer.Id} Size={packet.Size} PeerBytes={fromPeer.FjPendingReceiveBytes} GlobalBytes={_fjPendingReceiveBytesGlobal}");
                     DisconnectPeerForce(fromPeer, DisconnectReason.FjQueueOverflow, 0, null);
                     return;
                 }

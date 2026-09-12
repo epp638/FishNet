@@ -90,6 +90,8 @@ namespace LiteNetLib
             if (!NetManager.FjTryReserveSend(this, packet.Size))
             {
                 NetManager.PoolRecycle(packet);
+                FjDiagRing.Log(FjLease?.Epoch ?? 0, "SendOverflow",
+                    $"PeerId={Id} Size={packet.Size} PeerBytes={FjPendingSendBytes} Unreliable=true");
                 NetManager.DisconnectPeerForce(this, DisconnectReason.FjQueueOverflow, 0, null);
                 return;
             }
