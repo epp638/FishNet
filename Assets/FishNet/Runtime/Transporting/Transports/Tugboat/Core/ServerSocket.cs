@@ -6,7 +6,9 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
-using UnityEngine; // FJ#1450 (Brief 1450c, temporaer -- Diagnose, siehe Listener_ConnectionRequestEvent unten)
+// FJ#1488 (rev5 Schritt 6): "using UnityEngine" entfernt -- die einzigen Verwender (FJ#1450-
+// Diagnosezeilen in Listener_ConnectionRequestEvent) sind ersetzt. Kein Unity-API-Zugriff mehr
+// in dieser Datei, Voraussetzung fuer Schritt 7 (Netz-Thread-Verarbeitung).
 
 namespace FishNet.Transporting.Tugboat.Server
 {
@@ -356,32 +358,46 @@ namespace FishNet.Transporting.Tugboat.Server
         /// </summary>
         private void Listener_ConnectionRequestEvent(ConnectionRequest request)
         {
-            // FJ#1450 (Brief 1450c, temporaer -- Diagnose): beweist, ob die Connect-Request des
-            // Clients den Host ueberhaupt als Ereignis erreicht (vs. Paketverlust vorher). NICHT
-            // dauerhaft gedacht, siehe Ledger FJ#1450 "Brief 1450c".
-            Debug.Log($"[Net_DIAG] FJ#1450: Listener_ConnectionRequestEvent gefeuert -- Remote={request.RemoteEndPoint} " +
-                $"Realtime={Time.realtimeSinceStartup:F3}s Wanduhr={DateTime.UtcNow:O}.");
-
             if (NetManager == null)
                 return;
 
-            // FJ#1459 (Brief 1459b Folgeauftrag "Go B", temporaer -- Diagnose): misst die Luecke
-            // zwischen CONNREQ_DEQUEUE (NetManager.ProcessEvent) und diesem Handler -- sollte
-            // praktisch 0ms sein, da PollEvents() synchron bis hierher durchlaeuft. Bestaetigt
-            // v.a., OB dieser Handler bei Fehlerbild B (Host empfaengt, antwortet nie) ueberhaupt
-            // erreicht wird.
-            LiteNetLib.Fj1459SocketDiag.Emit("ACCEPT_HANDLER_ENTERED", $"remote={request.RemoteEndPoint} connectedPeers={NetManager.ConnectedPeersCount} max={_maximumClients}");
+            // FJ#1488 (rev5 Schritt 6): die beiden FJ#1450/1459-Diagnosezeilen (Debug.Log +
+            // Time.realtimeSinceStartup) sind ENTFERNT -- Unity-API auf dem Netz-Thread war genau
+            // die Falle, die FJ#1488 ueberhaupt erst noetig gemacht hat (Bibliotheks-Nachweis:
+            // Ledger FJ#1488 "Diagnose 1"/"Diagnose 2"). Ersatz: FjDiagRing, keine Unity-Abhaengigkeit,
+            // sicher von jedem Thread aus aufrufbar -- inklusive dem Netz-Thread, sobald
+            // UnsyncedConnectionRequests (Schritt 7) diesen Handler dorthin verschiebt.
+            FjDiagRing.Log(NetManager.FjEpoch, "RequestEntered",
+                $"Remote={request.RemoteEndPoint} ConnectedPeers={NetManager.ConnectedPeersCount} Max={_maximumClients}");
 
-            //At maximum peers.
+            // At maximum peers (bestehendes FishNet-Gesamtlimit).
             if (NetManager.ConnectedPeersCount >= _maximumClients)
             {
-                LiteNetLib.Fj1459SocketDiag.Emit("ACCEPT_REJECTED", $"remote={request.RemoteEndPoint} reason=max-peers");
+                FjDiagRing.Log(NetManager.FjEpoch, "Rejected", $"Remote={request.RemoteEndPoint} Reason=MaxPeers");
+                request.Reject();
+                return;
+            }
+
+            // FJ#1488 (rev5 §7.1/§7.3, Schritt 6): zusaetzliches, engeres Admission-Budget --
+            // begrenzt gleichzeitig UNAUTHENTIFIZIERTE Verbindungen unabhaengig vom groben
+            // FishNet-Gesamtlimit oben. Reiner Lesezugriff hier: der einzige Schreiber, der
+            // _fjPendingUnauthenticatedCount inkrementiert (OnConnectionSolved-Accept-Zweig),
+            // laeuft auf demselben Thread wie dieser Handler (synchron innerhalb desselben
+            // Paket-Verarbeitungsaufrufs, egal ob Main-Thread heute oder Netz-Thread nach Schritt 7)
+            // -- keine zwei Schreiber, die sich gegenseitig ueberholen koennten. Die einzigen
+            // GLEICHZEITIGEN Schreiber (LogicThread-Timeout, kuenftiger Auth-Erfolg) dekrementieren
+            // ausschliesslich, koennen den Zaehler also nur zugunsten dieses Checks veraendern.
+            if (NetManager.FjPendingUnauthenticatedCount >= NetManager.FjMaxPendingUnauthenticated)
+            {
+                FjDiagRing.Log(NetManager.FjEpoch, "Rejected",
+                    $"Remote={request.RemoteEndPoint} Reason=PendingBudget Pending={NetManager.FjPendingUnauthenticatedCount} Max={NetManager.FjMaxPendingUnauthenticated}");
                 request.Reject();
                 return;
             }
 
             NetPeer acceptedPeer = request.AcceptIfKey(key: string.Empty);
-            LiteNetLib.Fj1459SocketDiag.Emit("ACCEPT_RESULT", $"remote={request.RemoteEndPoint} peer={(acceptedPeer != null ? acceptedPeer.Id.ToString() : "NULL")}");
+            FjDiagRing.Log(NetManager.FjEpoch, "RequestResult",
+                $"Remote={request.RemoteEndPoint} Peer={(acceptedPeer != null ? acceptedPeer.Id.ToString() : "NULL")}");
         }
 
         /// <summary>
