@@ -92,6 +92,23 @@ namespace FishNet.Transporting.Tugboat.Client
             NetManager.DontRoute = ((Tugboat)Transport).DontRoute;
             NetManager.MtuOverride = _mtu;// + NetConstants.FragmentedHeaderTotalSize;
 
+            // FJ#1459b (Go-B-Fix, Root-Cause-Beleg via CONNREQ_ENQUEUE/CONNREQ_DEQUEUE-Instrumentierung):
+            // der LiteNetLib-Default (ReconnectDelay=500ms x MaxConnectAttempts=10 = ~5s) ist UNABHAENGIG
+            // von NetManager.DisconnectTimeout (30 Min. Default) -- ein rein client-seitiger Retry-Zaehler
+            // fuer die "Outgoing"-Verbindungsphase (NetPeer.Update(), ConnectionState.Outgoing), der auch
+            // dann ablaeuft, wenn der Server nie antwortet. FJ#1457 hatte bereits belegt, dass der schwere
+            // synchrone Primary-Spawn-Pfad (DevHub.Start() -> PlayerSpawner.SpawnPrimaryIfNeeded(), bewusst
+            // vom Netzwerk-Zustand entkoppelt, Pillar-Vorgabe "Play druecken, sofort spielen" -- DARF nicht
+            // verzoegert werden) den Hauptthread mehrere Sekunden blockieren kann. FJ#1459b hat das jetzt
+            // direkt beweisen: CONNREQ_ENQUEUE feuert, aber ueber 7,5+s KEIN CONNREQ_DEQUEUE (PollEvents()
+            // laeuft nicht), exakt im Fenster des Primary-Spawns -- auf BEIDEN Seiten (Host-eigener lokaler
+            // Client UND externer Client, da ClientSocket.cs fuer beide denselben Code-Pfad nutzt). Da der
+            // Spawn-Pfad architektonisch nicht verzoegert werden darf, ist die einzige sichere Stellschraube
+            // ohne Gameplay-Aenderung das Verlaengern des client-seitigen Verbindungs-Wartefensters auf
+            // 20s (40 x 500ms) -- deckt den beobachteten Worst-Case (7,5s+) mit komfortablem Puffer ab,
+            // ohne echte Verbindungsfehler unangemessen lange zu verschleiern.
+            NetManager.MaxConnectAttempts = 40;
+
             UpdateTimeout(_timeout);
 
             LocalConnectionStates.Enqueue(LocalConnectionState.Starting);

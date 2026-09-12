@@ -4,6 +4,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using UnityEngine; // FJ#1450 (Brief 1450c, temporaer -- Diagnose, siehe PollSocket unten)
 
 namespace FishNet.Transporting.Tugboat
 {
@@ -146,8 +147,27 @@ namespace FishNet.Transporting.Tugboat
             reader.Recycle();
         }
 
+        // FJ#1450 (Brief 1450c, temporaer -- Diagnose): -1 = noch kein vorheriger Aufruf.
+        private float _fj1450LastPollRealtime = -1f;
+
         internal void PollSocket(NetManager nm)
         {
+            // FJ#1450 (Brief 1450c, temporaer -- Diagnose): maximaler Abstand zwischen
+            // PollEvents()-Aufrufen. Schwelle 100ms (>3x der 33,33ms-Tick-Rate) haelt die Zeile
+            // selten genug fuer einen 5,5s-Verbindungsversuch. NICHT dauerhaft gedacht, siehe
+            // Ledger FJ#1450 "Brief 1450c".
+            float now = Time.realtimeSinceStartup;
+            if (_fj1450LastPollRealtime >= 0f)
+            {
+                float gapMs = (now - _fj1450LastPollRealtime) * 1000f;
+                if (gapMs > 100f)
+                {
+                    Debug.Log($"[Net_DIAG] FJ#1450: PollSocket-Luecke {gapMs:F0}ms ({GetType().Name}) " +
+                        $"Realtime={now:F3}s.");
+                }
+            }
+            _fj1450LastPollRealtime = now;
+
             nm?.PollEvents();
         }
 

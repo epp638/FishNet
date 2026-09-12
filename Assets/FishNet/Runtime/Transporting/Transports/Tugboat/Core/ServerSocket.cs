@@ -6,6 +6,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
+using UnityEngine; // FJ#1450 (Brief 1450c, temporaer -- Diagnose, siehe Listener_ConnectionRequestEvent unten)
 
 namespace FishNet.Transporting.Tugboat.Server
 {
@@ -355,17 +356,32 @@ namespace FishNet.Transporting.Tugboat.Server
         /// </summary>
         private void Listener_ConnectionRequestEvent(ConnectionRequest request)
         {
+            // FJ#1450 (Brief 1450c, temporaer -- Diagnose): beweist, ob die Connect-Request des
+            // Clients den Host ueberhaupt als Ereignis erreicht (vs. Paketverlust vorher). NICHT
+            // dauerhaft gedacht, siehe Ledger FJ#1450 "Brief 1450c".
+            Debug.Log($"[Net_DIAG] FJ#1450: Listener_ConnectionRequestEvent gefeuert -- Remote={request.RemoteEndPoint} " +
+                $"Realtime={Time.realtimeSinceStartup:F3}s Wanduhr={DateTime.UtcNow:O}.");
+
             if (NetManager == null)
                 return;
+
+            // FJ#1459 (Brief 1459b Folgeauftrag "Go B", temporaer -- Diagnose): misst die Luecke
+            // zwischen CONNREQ_DEQUEUE (NetManager.ProcessEvent) und diesem Handler -- sollte
+            // praktisch 0ms sein, da PollEvents() synchron bis hierher durchlaeuft. Bestaetigt
+            // v.a., OB dieser Handler bei Fehlerbild B (Host empfaengt, antwortet nie) ueberhaupt
+            // erreicht wird.
+            LiteNetLib.Fj1459SocketDiag.Emit("ACCEPT_HANDLER_ENTERED", $"remote={request.RemoteEndPoint} connectedPeers={NetManager.ConnectedPeersCount} max={_maximumClients}");
 
             //At maximum peers.
             if (NetManager.ConnectedPeersCount >= _maximumClients)
             {
+                LiteNetLib.Fj1459SocketDiag.Emit("ACCEPT_REJECTED", $"remote={request.RemoteEndPoint} reason=max-peers");
                 request.Reject();
                 return;
             }
 
-            request.AcceptIfKey(key: string.Empty);
+            NetPeer acceptedPeer = request.AcceptIfKey(key: string.Empty);
+            LiteNetLib.Fj1459SocketDiag.Emit("ACCEPT_RESULT", $"remote={request.RemoteEndPoint} peer={(acceptedPeer != null ? acceptedPeer.Id.ToString() : "NULL")}");
         }
 
         /// <summary>
