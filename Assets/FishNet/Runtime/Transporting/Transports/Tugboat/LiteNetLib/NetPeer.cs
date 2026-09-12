@@ -1195,7 +1195,7 @@ namespace LiteNetLib
                         if (FjLease.TryTransition(FjAdmissionLease.StatePending, FjAdmissionLease.StateTimedOut))
                         {
                             NetManager.FjDecrementPendingUnauthenticated();
-                            FjDiagRing.Log(FjLease.Epoch, "PreAuthTimeout", $"PeerId={Id} Remote={EndPoint}");
+                            FjDiagRing.Log(FjLease.Epoch, "PreAuthTimeout", $"PeerId={Id} Remote={Address}:{Port}");
                             NetManager.DisconnectPeerForce(this, DisconnectReason.Timeout, 0, null);
                         }
                         return;
