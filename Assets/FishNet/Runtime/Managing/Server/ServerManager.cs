@@ -913,6 +913,26 @@ namespace FishNet.Managing.Server
         /// <param name = "connectionId"></param>
         private void ClientAuthenticated(NetworkConnection connection)
         {
+            // FJ#1488 (plan_FJ1488 rev5 §6.2, Schritt 7): Admission-Vorpruefung VOR jedem
+            // Seiteneffekt. Nur fuer den festgelegten Tugboat-Pfad (rev5 §2 Nicht-Ziel: kein
+            // Multipass/Beliebig-Transport-Umbau) -- andere Transporte durchlaufen das Gate nicht,
+            // weil sie keine FjAdmissionLease kennen (kein stiller Bypass, sondern schlicht nicht
+            // anwendbar). Fehlender Kontext, TimedOut/Closed oder verlorener Uebergang: keine
+            // Auth-Veroeffentlichung, kontrollierte Trennung.
+            if (NetworkManager.TransportManager.Transport is FishNet.Transporting.Tugboat.Tugboat tugboat)
+            {
+                bool hasLease = tugboat.ServerSocket.FjTryGetAdmissionLease(connection.ClientId, out LiteNetLib.FjAdmissionLease lease);
+                if (!hasLease || !lease.TryTransition(LiteNetLib.FjAdmissionLease.StatePending, LiteNetLib.FjAdmissionLease.StateAuthenticated))
+                {
+                    LiteNetLib.FjDiagRing.Log(hasLease ? lease.Epoch : 0, "AuthGateRejected",
+                        $"ClientId={connection.ClientId} HasLease={hasLease} State={(hasLease ? lease.CurrentState : -1)}");
+                    connection.Disconnect(false);
+                    return;
+                }
+                tugboat.ServerSocket.NetManager.FjDecrementPendingUnauthenticated();
+                LiteNetLib.FjDiagRing.Log(lease.Epoch, "AuthGatePassed", $"ClientId={connection.ClientId}");
+            }
+
             /* Immediately send connectionId to client. Some transports
              * don't give clients their remoteId, therefor it has to be sent
              * by the ServerManager. This packet is very simple and can be built

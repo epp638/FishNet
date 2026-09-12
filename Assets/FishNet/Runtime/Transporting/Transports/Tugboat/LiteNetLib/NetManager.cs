@@ -172,6 +172,13 @@ namespace LiteNetLib
         internal long FjEpoch => _fjEpoch;
         internal int FjPendingUnauthenticatedCount => Volatile.Read(ref _fjPendingUnauthenticatedCount);
 
+        /// <summary>FJ#1488 (rev5 §5.1 Schritt 7): Gegenstueck zum Pending-Decrement in
+        /// <c>RemovePeerInternal</c> (Pending-&gt;Closed) -- wird vom LogicThread aufgerufen, wenn
+        /// <see cref="FjAdmissionLease.TryTransition"/> den Uebergang Pending-&gt;TimedOut GEWINNT.
+        /// Nur der Gewinner-Aufrufer darf dies aufrufen (Einmal-Freigabe-Invariante).</summary>
+        internal void FjDecrementPendingUnauthenticated() =>
+            Interlocked.Decrement(ref _fjPendingUnauthenticatedCount);
+
         // FJ#1488 (plan_FJ1488 rev5 §7.1/§7.2, Schritt 5): Budget auf der ERSTEN
         // Hauptthread-Warteschlange (_pendingEventHead/_pendingEventTail, s. Ledger FJ#1488
         // "Diagnose 2") -- vor dem Einreihen reserviert, nicht erst in Tugboats _incoming.
@@ -323,6 +330,15 @@ namespace LiteNetLib
         /// If true - delivery event will be called from "receive" thread immediately otherwise on PollEvents call
         /// </summary>
         public bool UnsyncedDeliveryEvent = false;
+        /// <summary>FJ#1488 (plan_FJ1488 rev5 §11 Schritt 7): wenn true, wird ausschliesslich
+        /// <see cref="NetEvent.EType.ConnectionRequest"/> sofort auf dem aufrufenden Thread
+        /// (Netz-Thread) verarbeitet, unabhaengig von <see cref="UnsyncedEvents"/> und ohne auf
+        /// <see cref="PollEvents"/> (Unity-Main-Thread) zu warten -- macht die Verbindungsannahme
+        /// vom Main-Thread unabhaengig. Alle anderen Ereignistypen bleiben unveraendert an
+        /// PollEvents gebunden (Plan-Vorgabe, kein UnsyncedEvents-Vollausbau). Vor
+        /// <see cref="NetManager.Start"/> setzen -- keine Laufzeit-Umschaltung bei offenen
+        /// Requests (Schritt-6-Doku).</summary>
+        public bool UnsyncedConnectionRequests = false;
         /// <summary>
         /// Allows receive broadcast packets
         /// </summary>
@@ -489,6 +505,10 @@ namespace LiteNetLib
                 Interlocked.Increment(ref _connectedPeersCount);
             else if (type == NetEvent.EType.MessageDelivered)
                 unsyncEvent = UnsyncedDeliveryEvent;
+            // FJ#1488 (rev5 §11 Schritt 7): NUR ConnectionRequest wird durch das eigene Flag
+            // entkoppelt -- kein Vollausbau auf UnsyncedEvents (Plan-Nicht-Ziel, §2).
+            else if (type == NetEvent.EType.ConnectionRequest && UnsyncedConnectionRequests)
+                unsyncEvent = true;
 
             lock (_eventLock)
             {

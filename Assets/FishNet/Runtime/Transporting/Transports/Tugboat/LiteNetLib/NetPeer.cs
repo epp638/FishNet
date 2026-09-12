@@ -1184,6 +1184,22 @@ namespace LiteNetLib
             switch (ConnectionState)
             {
                 case ConnectionState.Connected:
+                    // FJ#1488 (plan_FJ1488 rev5 §5.1/§8.1, Schritt 7): Vor-Auth-Frist auf dem
+                    // LogicThread durchsetzen -- unabhaengig vom Unity-Main-Thread. Nur der
+                    // Gewinner des atomaren Uebergangs (TryTransition) darf die Pending-Freigabe
+                    // und den Disconnect ausloesen; ein zwischenzeitlich gewonnener
+                    // Pending->Authenticated-Uebergang macht diesen Versuch wirkungslos.
+                    if (FjLease != null && FjLease.CurrentState == FjAdmissionLease.StatePending &&
+                        Stopwatch.GetTimestamp() >= FjLease.PreAuthDeadlineTicks)
+                    {
+                        if (FjLease.TryTransition(FjAdmissionLease.StatePending, FjAdmissionLease.StateTimedOut))
+                        {
+                            NetManager.FjDecrementPendingUnauthenticated();
+                            FjDiagRing.Log(FjLease.Epoch, "PreAuthTimeout", $"PeerId={Id} Remote={EndPoint}");
+                            NetManager.DisconnectPeerForce(this, DisconnectReason.Timeout, 0, null);
+                        }
+                        return;
+                    }
                     if (_timeSinceLastPacket > NetManager.DisconnectTimeout)
                     {
                         NetDebug.Write($"[UPDATE] Disconnect by timeout: {_timeSinceLastPacket} > {NetManager.DisconnectTimeout}");

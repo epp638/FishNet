@@ -132,7 +132,12 @@ namespace FishNet.Transporting.Tugboat.Server
             NetManager.DontRoute = ((Tugboat)Transport).DontRoute;
             NetManager.ReuseAddress = ((Tugboat)Transport).ReuseAddress;
             NetManager.MtuOverride = _mtu;// + NetConstants.FragmentedHeaderTotalSize;
-            
+
+            // FJ#1488 (plan_FJ1488 rev5 §11 Schritt 7): ConnectionRequest-Verarbeitung vom
+            // Unity-Main-Thread entkoppeln -- muss VOR Start() gesetzt sein (keine
+            // Laufzeit-Umschaltung bei offenen Requests, Schritt-6-Doku).
+            NetManager.UnsyncedConnectionRequests = true;
+
             UpdateTimeout(_timeout);
 
             // Set bind addresses.
@@ -240,6 +245,21 @@ namespace FishNet.Transporting.Tugboat.Server
             {
                 return null;
             }
+        }
+
+        /// <summary>FJ#1488 (plan_FJ1488 rev5 §6.2, Schritt 7): liefert die Admission-Lease des
+        /// Peers zu <paramref name="connectionId"/> fuer das Auth-Vorpruefung-Gate in
+        /// ServerManager.ClientAuthenticated. ID-basierte Suche wie ueberall sonst in dieser Klasse
+        /// (z.B. IterateIncoming) -- kein Dictionary-Umweg, aber auch keine Lebensdauer-getreue
+        /// Zuordnung ueber verzoegerte Ereignisse hinweg (rev5 §6.1 volle Fassung nicht umgesetzt,
+        /// siehe Ledger FJ#1488 "Result Schritt 7"). Praktisch unkritisch: die Auth-Vorpruefung
+        /// laeuft im selben oder naechsten Tick nach dem Accept, ID-Recycling braucht 5000 IDs
+        /// Abstand (NetManager.GetNextPeerId).</summary>
+        internal bool FjTryGetAdmissionLease(int connectionId, out FjAdmissionLease lease)
+        {
+            NetPeer peer = GetNetPeer(connectionId, false);
+            lease = peer?.FjLease;
+            return lease != null;
         }
 
         /// <summary>
